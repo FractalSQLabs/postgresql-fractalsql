@@ -1,0 +1,420 @@
+name: Release postgresql-fractalsql Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
+
+jobs:
+  # One build cell per {PG major, arch}. Each cell produces a single
+  # fractalsql_pg${VER}.so, validates it in-container, and (amd64 only)
+  # runs a smoke test inside a real postgres:${VER} image.
+  build:
+    name: build pg${{ matrix.pg }} / ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg:   [14, 15, 16, 17, 18]
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build fractalsql_pg${{ matrix.pg }}.so for ${{ matrix.arch }}
+        run: |
+          mkdir -p "dist/${{ matrix.arch }}"
+          DOCKER_BUILDKIT=1 docker buildx build \
+              --platform "linux/${{ matrix.arch }}" \
+              --target "export-pg${{ matrix.pg }}" \
+              --output "type=local,dest=dist/${{ matrix.arch }}" \
+              -f docker/Dockerfile \
+              .
+          ls -l "dist/${{ matrix.arch }}/fractalsql_pg${{ matrix.pg }}.so"
+
+      # amd64 only — native smoke test inside a real postgres container.
+      # arm64 is covered implicitly: if the link step inside the arm64
+      # build stage succeeded, PG_MODULE_MAGIC and the .dynsym exports
+      # are correct for that architecture.
+      - name: Smoke test (CREATE EXTENSION + version/edition + search)
+        if: matrix.arch == 'amd64'
+        run: |
+          set -euo pipefail
+          PG_VER=${{ matrix.pg }}
+          SO="dist/amd64/fractalsql_pg${PG_VER}.so"
+
+          docker run -d --name pg \
+              -e POSTGRES_PASSWORD=test \
+              -e POSTGRES_HOST_AUTH_METHOD=trust \
+              "postgres:${PG_VER}-bookworm"
+
+          # Wait for the server to accept connections.
+          for i in $(seq 1 30); do
+              if docker exec pg pg_isready -U postgres >/dev/null 2>&1; then
+                  break
+              fi
+              sleep 1
+          done
+          docker exec pg pg_isready -U postgres
+
+          docker cp "${SO}" \
+              "pg:/usr/lib/postgresql/${PG_VER}/lib/fractalsql.so"
+          docker cp fractalsql.control \
+              "pg:/usr/share/postgresql/${PG_VER}/extension/fractalsql.control"
+          docker cp sql/fractalsql--1.0.sql \
+              "pg:/usr/share/postgresql/${PG_VER}/extension/fractalsql--1.0.sql"
+
+          docker exec pg psql -U postgres -v ON_ERROR_STOP=1 \
+              -c "CREATE EXTENSION fractalsql;"
+
+          EDITION=$(docker exec pg psql -U postgres -tAc \
+              "SELECT fractalsql_edition();")
+          echo "edition: ${EDITION}"
+          test "${EDITION}" = "Community"
+
+          VERSION=$(docker exec pg psql -U postgres -tAc \
+              "SELECT fractalsql_version();")
+          echo "version: ${VERSION}"
+          test "${VERSION}" = "1.0.0"
+
+          # Convergence sanity check: query = (0.6, 0.8), objective is
+          # cosine distance. Cosine distance is magnitude-invariant,
+          # so every point on the ray through the origin and (0.6, 0.8)
+          # is a global optimum — the coordinates SFS returns can land
+          # anywhere along that ray inside [-1, 1]^2. We assert the
+          # invariant the optimizer is actually minimizing: cosine
+          # similarity to the query should be essentially 1.
+          # ||query||² = 0.6²+0.8² = 1, so cos_sim simplifies to
+          # (v·query) / ||v||.
+          RESULT=$(docker exec pg psql -U postgres -tAc "
+              WITH r AS (
+                  SELECT fractal_search(
+                      ARRAY[0.6, 0.8]::float8[], 100, 50, 2
+                  ) AS v
+              )
+              SELECT CASE
+                  WHEN sqrt(v[1]*v[1] + v[2]*v[2]) > 1e-9
+                   AND (v[1]*0.6 + v[2]*0.8)
+                       / sqrt(v[1]*v[1] + v[2]*v[2]) > 0.99
+                  THEN 'ok'
+                  ELSE format('FAIL v=%s', v)
+              END
+              FROM r;")
+          echo "convergence: ${RESULT}"
+          test "${RESULT}" = "ok"
+
+          docker rm -f pg
+
+      - name: Upload .so artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fractalsql-pg${{ matrix.pg }}-${{ matrix.arch }}-so
+          path: dist/${{ matrix.arch }}/fractalsql_pg${{ matrix.pg }}.so
+          if-no-files-found: error
+
+  # One packaging cell per arch. Collects all three per-major .so's
+  # for this arch from the build jobs above, then runs package.sh to
+  # produce 3x{.deb, .rpm}.
+  package:
+    name: package ${{ matrix.arch }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download pg14 .so
+        uses: actions/download-artifact@v4
+        with:
+          name: fractalsql-pg14-${{ matrix.arch }}-so
+          path: dist/${{ matrix.arch }}
+
+      - name: Download pg15 .so
+        uses: actions/download-artifact@v4
+        with:
+          name: fractalsql-pg15-${{ matrix.arch }}-so
+          path: dist/${{ matrix.arch }}
+
+      - name: Download pg16 .so
+        uses: actions/download-artifact@v4
+        with:
+          name: fractalsql-pg16-${{ matrix.arch }}-so
+          path: dist/${{ matrix.arch }}
+
+      - name: Download pg17 .so
+        uses: actions/download-artifact@v4
+        with:
+          name: fractalsql-pg17-${{ matrix.arch }}-so
+          path: dist/${{ matrix.arch }}
+
+      - name: Download pg18 .so
+        uses: actions/download-artifact@v4
+        with:
+          name: fractalsql-pg18-${{ matrix.arch }}-so
+          path: dist/${{ matrix.arch }}
+
+      - name: Install Packaging Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev build-essential rpm
+          sudo gem install --no-document fpm
+
+      - name: Build .deb and .rpm for ${{ matrix.arch }}
+        run: |
+          chmod +x package.sh
+          ./package.sh ${{ matrix.arch }}
+          ls -l dist/packages
+
+      # Verify no luajit runtime dep leaked into the package metadata.
+      - name: Verify packages declare no luajit dependency
+        run: |
+          set -euo pipefail
+          for deb in dist/packages/*-${{ matrix.arch }}.deb; do
+              echo "=== ${deb} ==="
+              DEPS=$(dpkg-deb -f "${deb}" Depends)
+              echo "Depends: ${DEPS}"
+              if echo "${DEPS}" | grep -iE 'luajit'; then
+                  echo "FAIL: ${deb} declares a luajit dependency" >&2
+                  exit 1
+              fi
+          done
+          for rpm in dist/packages/*-${{ matrix.arch }}.rpm; do
+              echo "=== ${rpm} ==="
+              REQS=$(rpm -qpR "${rpm}" || true)
+              echo "Requires:"
+              echo "${REQS}"
+              if echo "${REQS}" | grep -iE '^luajit'; then
+                  echo "FAIL: ${rpm} declares a luajit requirement" >&2
+                  exit 1
+              fi
+          done
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgresql-fractalsql-${{ matrix.arch }}
+          path: dist/packages/*
+          if-no-files-found: error
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/packages/*
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ------------------------------------------------------------------
+  # Windows: fractalsql.dll + FractalSQL-PostgreSQL-<NN>-<VER>-x64.msi
+  #
+  # Matrix — x64 only.
+  #   x86   : EDB hasn't shipped a 32-bit Windows PG installer since
+  #           PG 11, so there's no host server for a 32-bit DLL.
+  #   arm64 : EDB publishes Windows ARM64 PG as an .exe BitRock
+  #           installer only — there is no "-binaries.zip" variant.
+  #           Silent-extracting the .exe to harvest postgres.lib +
+  #           server headers is possible but non-trivial; deferring
+  #           arm64 Windows until a post-v1.0.0 iteration.
+  #   x64   : full coverage for PG 14-18 via EDB's published
+  #           postgresql-<VER>-<ITER>-windows-x64-binaries.zip.
+  #
+  # Each cell:
+  #   1. Pulls EDB's per-PG "binaries" .zip from get.enterprisedb.com
+  #      — includes include\server\ and lib\postgres.lib.
+  #   2. Builds static LuaJIT 2.1 via msvcbuild.bat.
+  #   3. Runs scripts\windows\build.bat to produce fractalsql.dll
+  #      against that PG major's server headers (/MT /GL static CRT,
+  #      static libluajit, postgres.lib stub).
+  #   4. Asserts dumpbin /dependents shows no MSVC redistributable
+  #      imports and no dynamic lua51.dll.
+  #   5. Runs scripts\windows\build-msi.bat to produce one MSI
+  #      named FractalSQL-PostgreSQL-<PG_MAJOR>-<MSI_VERSION>-x64.msi.
+  # ------------------------------------------------------------------
+  build-windows-msi:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg: 14
+            arch: x64
+            runner: windows-latest
+            edb_version: "14.13-1"
+          - pg: 15
+            arch: x64
+            runner: windows-latest
+            edb_version: "15.8-1"
+          - pg: 16
+            arch: x64
+            runner: windows-latest
+            edb_version: "16.4-1"
+          - pg: 17
+            arch: x64
+            runner: windows-latest
+            edb_version: "17.0-1"
+          - pg: 18
+            arch: x64
+            runner: windows-latest
+            edb_version: "18.0-1"
+    runs-on: ${{ matrix.runner }}
+    name: windows pg${{ matrix.pg }} / ${{ matrix.arch }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC dev cmd (${{ matrix.arch }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Install WiX Toolset (provides candle.exe + light.exe)
+        shell: pwsh
+        run: |
+          choco install -y --no-progress wixtoolset
+
+          # On the x64 runner, choco shims candle/light into
+          # C:\ProgramData\chocolatey\bin automatically. On the
+          # windows-11-arm runner it doesn't — append the WiX bin dir
+          # to $GITHUB_PATH explicitly so later steps find candle.exe.
+          $wixBin = $null
+          $candidates = @(
+            "C:\Program Files (x86)\WiX Toolset v3.14\bin",
+            "C:\Program Files\WiX Toolset v3.14\bin",
+            "C:\Program Files (x86)\WiX Toolset v3.11\bin"
+          )
+          foreach ($c in $candidates) {
+            if (Test-Path (Join-Path $c "candle.exe")) { $wixBin = $c; break }
+          }
+          if (-not $wixBin) {
+            Write-Host "Searching under Program Files for candle.exe..."
+            $hit = Get-ChildItem -Path "C:\Program Files (x86)", "C:\Program Files" `
+                     -Recurse -Filter "candle.exe" -ErrorAction SilentlyContinue `
+                   | Select-Object -First 1
+            if ($hit) { $wixBin = $hit.DirectoryName }
+          }
+          if (-not $wixBin) {
+            Write-Host "FATAL: candle.exe not found after choco install wixtoolset"
+            exit 1
+          }
+          Write-Host "WiX bin dir: $wixBin"
+          Add-Content -Path $env:GITHUB_PATH -Value $wixBin
+
+      - name: Clone + build static LuaJIT 2.1 with MSVC
+        shell: cmd
+        run: |
+          if not exist deps mkdir deps
+          git clone --depth 1 --branch v2.1 https://github.com/LuaJIT/LuaJIT.git deps\LuaJIT
+          cd deps\LuaJIT\src
+          call msvcbuild.bat static
+          if not exist lua51.lib (
+            echo ==^> LuaJIT static build failed
+            exit /b 1
+          )
+          dir lua51.lib lua.h
+
+      - name: Download + unpack EDB PostgreSQL ${{ matrix.edb_version }} ${{ matrix.arch }} binaries
+        shell: pwsh
+        env:
+          EDB_VERSION: ${{ matrix.edb_version }}
+          PG_ARCH:     ${{ matrix.arch }}
+        run: |
+          # EDB publishes per-(version, arch) "binaries" zips that
+          # contain a full pgsql\ tree (bin\, lib\, include\server\)
+          # without the interactive installer wrapper. This is what
+          # we need for cross-compiling an extension.
+          $zipName = "postgresql-${env:EDB_VERSION}-windows-${env:PG_ARCH}-binaries.zip"
+          $url     = "https://get.enterprisedb.com/postgresql/$zipName"
+          Write-Host "Fetching $url"
+          New-Item -ItemType Directory -Force -Path deps\pg | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile "deps\pg\edb.zip" -UseBasicParsing
+          Expand-Archive -Path "deps\pg\edb.zip" -DestinationPath "deps\pg" -Force
+
+          # The zip unpacks into deps\pg\pgsql\ — normalize to
+          # deps\pg\root so build.bat's PG_DIR is consistent.
+          if (Test-Path "deps\pg\pgsql") {
+            Rename-Item -Path "deps\pg\pgsql" -NewName "root"
+          } else {
+            Write-Host "FATAL: expected deps\pg\pgsql\ inside $zipName"
+            Get-ChildItem deps\pg -Recurse -Depth 2 | Format-Table
+            exit 1
+          }
+          Test-Path "deps\pg\root\include\server\postgres.h"
+          Test-Path "deps\pg\root\lib\postgres.lib"
+
+      - name: Build fractalsql.dll (/MT static CRT, /GL WPO, PG ${{ matrix.pg }})
+        shell: cmd
+        env:
+          PG_MAJOR: ${{ matrix.pg }}
+        run: |
+          set LUAJIT_DIR=%CD%\deps\LuaJIT\src
+          set PG_DIR=%CD%\deps\pg\root
+          set OUT_DIR=%CD%\dist\windows\pg%PG_MAJOR%
+          if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
+          call scripts\windows\build.bat
+          if errorlevel 1 exit /b 1
+          dir "%OUT_DIR%\fractalsql.dll"
+
+      - name: Smoke-check fractalsql.dll dependencies (dumpbin)
+        shell: pwsh
+        env:
+          PG_MAJOR: ${{ matrix.pg }}
+        run: |
+          $dll = "dist\windows\pg${env:PG_MAJOR}\fractalsql.dll"
+          $deps = dumpbin /dependents $dll
+          Write-Host ($deps -join "`n")
+          if ($deps -match 'vcruntime|msvcp140|msvcr\d') {
+              Write-Host '==> FAIL: .dll depends on MSVC redistributable DLLs'
+              exit 1
+          }
+          if ($deps -match 'lua51\.dll|libluajit') {
+              Write-Host '==> FAIL: .dll depends on a dynamic LuaJIT'
+              exit 1
+          }
+          Write-Host '==> OK: static CRT + static LuaJIT posture'
+
+      - name: Build MSI (candle + light, PG ${{ matrix.pg }} / ${{ matrix.arch }})
+        shell: cmd
+        env:
+          PG_MAJOR: ${{ matrix.pg }}
+          MSI_ARCH: ${{ matrix.arch }}
+        run: |
+          call scripts\windows\build-msi.bat
+          if errorlevel 1 exit /b 1
+          dir dist\windows\*.msi
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgresql-fractalsql-windows-pg${{ matrix.pg }}-${{ matrix.arch }}
+          path: dist/windows/FractalSQL-PostgreSQL-${{ matrix.pg }}-*-${{ matrix.arch }}.msi
+          if-no-files-found: error
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/windows/FractalSQL-PostgreSQL-${{ matrix.pg }}-*-${{ matrix.arch }}.msi
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,4 @@
+comment = 'Stochastic Fractal Search optimizer (LuaJIT) — companion to pgvector'
+default_version = '1.0'
+module_pathname = '$libdir/fractalsql'
+relocatable = true

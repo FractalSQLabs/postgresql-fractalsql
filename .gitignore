@@ -1,0 +1,52 @@
+# Build artifacts
+*.so
+*.o
+*.bc
+*.a
+*.dylib
+fractalsql.so
+fractal_pg*.so
+
+# NOTE: include/sfs_core_bc.h is a tracked source file
+# (pre-compiled LuaJIT bytecode). Do not add it to this list.
+
+# Build output trees
+dist/
+
+# PGXS-generated artifacts
+fractalsql--*.sql.in
+libfractalsql.pc
+results/
+tmp_check/
+regression.diffs
+regression.out
+
+# Packaging temp files (fpm + debhelper + rpmbuild stagedirs)
+*.deb
+*.rpm
+packaging/debian/.debhelper/
+packaging/debian/postgresql-*-fractalsql/
+packaging/debian/files
+packaging/debian/*.log
+packaging/debian/*.substvars
+packaging/rpm/BUILD/
+packaging/rpm/BUILDROOT/
+packaging/rpm/RPMS/
+packaging/rpm/SOURCES/
+packaging/rpm/SPECS/
+packaging/rpm/SRPMS/
+
+# Benchmark harness (Python, psycopg + HNSW)
+bench/__pycache__/
+bench/**/__pycache__/
+bench/*.pyc
+bench/.pytest_cache/
+bench/data/
+
+# Editor / OS cruft
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

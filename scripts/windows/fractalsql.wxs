@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  scripts/windows/fractalsql.wxs — WiX Toolset source for the
+  FractalSQL PostgreSQL extension Windows MSI.
+
+  Driven by three preprocessor vars supplied by build-msi.bat:
+    -dPG_MAJOR=14|15|16|17|18
+    -dSTAGE_DIR=dist\windows\staging-pg<NN>-<arch>
+    -dMSI_VERSION=1.0.0
+  plus the standard candle -arch <x64|arm64> which populates
+  $(sys.BUILDARCH) and picks the right ProgramFiles dir / Package
+  Platform.
+
+  UX flow
+    1. Welcome / EULA (uses bundled LICENSE).
+    2. WixUI_InstallDir lets the user pick the PG install root
+       (default: C:\Program Files\PostgreSQL\<PG_MAJOR>). This must
+       be the folder that contains lib\ and share\extension\ — the
+       same folder EDB's PG installer creates by default.
+    3. Install copies fractalsql.dll into lib\, the .control and
+       .sql scripts into share\extension\, and the LICENSE files
+       into share\doc\fractalsql\.
+    4. Uninstall removes every file cleanly.
+
+  Per-PG-major UpgradeCode
+    Each PG major gets its own UpgradeCode so installing the PG 14
+    and PG 17 MSIs side-by-side does not trigger MajorUpgrade on
+    either. ProductId=* forces a fresh ProductCode per build, so
+    re-installing the same MSI overwrites cleanly.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+  <?if $(var.PG_MAJOR) = "14" ?>
+      <?define UpgradeCode = "6F2A8C1D-4E5F-4A3B-9C8D-1E2F3A4B5C60" ?>
+  <?elseif $(var.PG_MAJOR) = "15" ?>
+      <?define UpgradeCode = "7A3B9D2E-5F6A-4B4C-AD9E-2F3A4B5C6D71" ?>
+  <?elseif $(var.PG_MAJOR) = "16" ?>
+      <?define UpgradeCode = "8B4CAE3F-607B-4C5D-BEAF-3A4B5C6D7E82" ?>
+  <?elseif $(var.PG_MAJOR) = "17" ?>
+      <?define UpgradeCode = "9C5DBF40-718C-4D6E-CFB0-4B5C6D7E8F93" ?>
+  <?elseif $(var.PG_MAJOR) = "18" ?>
+      <?define UpgradeCode = "AD6EC051-829D-4E7F-D0C1-5C6D7E8F90A4" ?>
+  <?else ?>
+      <?error Unsupported PG_MAJOR: $(var.PG_MAJOR) ?>
+  <?endif ?>
+
+  <Product Id="*"
+           Name="FractalSQL for PostgreSQL $(var.PG_MAJOR)"
+           Language="1033"
+           Version="$(var.MSI_VERSION)"
+           Manufacturer="FractalSQLabs"
+           UpgradeCode="$(var.UpgradeCode)">
+
+    <!-- sys.BUILDARCH comes from candle's -arch flag:
+           candle -arch x64   -> Platform="x64"   / ProgramFiles64Folder
+           candle -arch arm64 -> Platform="arm64" / ProgramFiles64Folder
+         Both x64 and arm64 Windows install into C:\Program Files. -->
+    <Package InstallerVersion="300"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Platform="$(sys.BUILDARCH)"
+             Description="FractalSQL PostgreSQL $(var.PG_MAJOR) extension installer"
+             Manufacturer="FractalSQLabs" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of FractalSQL for PostgreSQL $(var.PG_MAJOR) is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="WIXUI_INSTALLDIR" Value="PGROOT" />
+
+    <!-- We ship only x64 and arm64 MSIs for PG — EDB hasn't produced
+         a 32-bit Windows PG installer since PG 11, so an x86 cell
+         would have nowhere to install into. -->
+    <?if $(sys.BUILDARCH) = "x86" ?>
+        <?error PG extensions are not shipped for win32 x86 (no EDB host binary) ?>
+    <?endif ?>
+
+    <!--
+         Directory layout mirrors EDB's default PG install:
+           C:\Program Files\PostgreSQL\<PG_MAJOR>\
+             lib\                 fractalsql.dll
+             share\extension\     fractalsql.control
+                                  fractalsql-1.0.sql (install script)
+             share\doc\fractalsql\ LICENSE
+                                   LICENSE-THIRD-PARTY
+                                   README.txt
+    -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="PostgreSQLFolder" Name="PostgreSQL">
+          <Directory Id="PGROOT" Name="$(var.PG_MAJOR)">
+            <Directory Id="LibDir" Name="lib" />
+            <Directory Id="ShareDir" Name="share">
+              <Directory Id="ExtensionDir" Name="extension" />
+              <Directory Id="DocDir" Name="doc">
+                <Directory Id="FractalSqlDocDir" Name="fractalsql" />
+              </Directory>
+            </Directory>
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <!-- Each file is its own Component so uninstall removes exactly
+         the set we installed — no orphan files, no touched-existing
+         PG files. GUIDs are per-PG-major-varied by the PG_MAJOR
+         preprocessor var concatenated with a stable suffix, giving
+         each (PG_MAJOR, file) pair a deterministic identity across
+         rebuilds without colliding across PG majors. -->
+
+    <ComponentGroup Id="CoreFiles">
+
+      <Component Id="c_FractalSqlDll"
+                 Directory="LibDir"
+                 Guid="C1A1$(var.PG_MAJOR)01-0000-4000-B000-00000000DA01">
+        <File Id="fractalsql.dll"
+              Source="$(var.STAGE_DIR)\fractalsql.dll"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="c_FractalSqlControl"
+                 Directory="ExtensionDir"
+                 Guid="C1A1$(var.PG_MAJOR)02-0000-4000-B000-00000000C710">
+        <File Id="fractalsql.control"
+              Source="$(var.STAGE_DIR)\fractalsql.control"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="c_FractalSqlInstallSql"
+                 Directory="ExtensionDir"
+                 Guid="C1A1$(var.PG_MAJOR)03-0000-4000-B000-000000005510">
+        <File Id="fractalsql__1.0.sql"
+              Name="fractalsql--1.0.sql"
+              Source="$(var.STAGE_DIR)\fractalsql--1.0.sql"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="c_License"
+                 Directory="FractalSqlDocDir"
+                 Guid="C1A1$(var.PG_MAJOR)04-0000-4000-B000-0000000011CE">
+        <File Id="LICENSE.txt"
+              Name="LICENSE"
+              Source="$(var.STAGE_DIR)\LICENSE"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="c_LicenseThirdParty"
+                 Directory="FractalSqlDocDir"
+                 Guid="C1A1$(var.PG_MAJOR)05-0000-4000-B000-00000003DA7A">
+        <File Id="LICENSE_THIRD_PARTY.txt"
+              Name="LICENSE-THIRD-PARTY"
+              Source="$(var.STAGE_DIR)\LICENSE-THIRD-PARTY"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="c_Readme"
+                 Directory="FractalSqlDocDir"
+                 Guid="C1A1$(var.PG_MAJOR)06-0000-4000-B000-00000000AD11">
+        <File Id="README.txt"
+              Source="$(var.STAGE_DIR)\README.txt"
+              KeyPath="yes" />
+      </Component>
+
+    </ComponentGroup>
+
+    <Feature Id="MainFeature"
+             Title="FractalSQL for PostgreSQL $(var.PG_MAJOR)"
+             Level="1"
+             Display="expand"
+             AllowAdvertise="no">
+      <ComponentGroupRef Id="CoreFiles" />
+    </Feature>
+
+    <!-- Standard WixUI_InstallDir flow (Welcome → EULA → FolderDlg →
+         Ready → Progress). The folder picker lets power-users retarget
+         a non-default PG install root (e.g. D:\PostgreSQL\17) — the
+         MSI installs into the chosen folder's lib\ / share\extension\
+         subpaths. -->
+    <UIRef Id="WixUI_InstallDir" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+
+  </Product>
+</Wix>
