@@ -179,7 +179,7 @@ static T2SAllowedStmts t2s_allowed_stmts_mode(void);
 static char *fractal_text_to_sql_internal(const char *question, ArrayType *table_names, char *feedback);
 
 #define FSQL_EDITION "Community"
-#define FSQL_VERSION "2.0.9"
+#define FSQL_VERSION "2.0.11"
 
 /* B4-extended (H3) — supply-side DoS guards.
  *

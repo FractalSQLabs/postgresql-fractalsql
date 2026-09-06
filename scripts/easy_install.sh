@@ -431,6 +431,27 @@ offer_cold_start_timeout() {
 
     local timeout_ms=330000 low_speed_secs=300
 
+    # postgres already owns its own Debian cluster (it can pg_ctlcluster
+    # its own cluster directly, same as the plain "start" call elsewhere
+    # in this script), so root or postgres skip sudo there. systemd on
+    # RHEL has no such exception -- only root can touch it.
+    local as_root=0 as_postgres=0
+    [[ "$(id -u)" -eq 0 ]] && as_root=1
+    [[ "$(id -un)" == "postgres" ]] && as_postgres=1
+    local skip_sudo_debian=0 skip_sudo_rhel=0
+    [[ "${as_root}" -eq 1 || "${as_postgres}" -eq 1 ]] && skip_sudo_debian=1
+    [[ "${as_root}" -eq 1 ]] && skip_sudo_rhel=1
+    priv() {
+        local skip="$1"; shift
+        if [[ "${skip}" -eq 1 ]]; then
+            "$@"
+        else
+            command -v sudo >/dev/null 2>&1 \
+                || die "this needs root privileges but 'sudo' isn't installed and you're not root. Install sudo, or re-run as root."
+            sudo "$@"
+        fi
+    }
+
     case "${OS_FAMILY}" in
         debian)
             local envfile="/etc/postgresql/${TARGET_MAJOR}/main/environment"
@@ -445,15 +466,17 @@ offer_cold_start_timeout() {
                 log "(--dry-run: not actually writing or restarting)"
                 return 0
             fi
-            sudo sed -i '/^FSQL_REASONING_HTTP_TIMEOUT_MS/d;/^FSQL_REASONING_HTTP_LOW_SPEED_SECS/d' "${envfile}"
+            local debian_restart_cmd="pg_ctlcluster ${TARGET_MAJOR} main restart"
+            [[ "${skip_sudo_debian}" -eq 1 ]] || debian_restart_cmd="sudo ${debian_restart_cmd}"
+            priv "${skip_sudo_debian}" sed -i '/^FSQL_REASONING_HTTP_TIMEOUT_MS/d;/^FSQL_REASONING_HTTP_LOW_SPEED_SECS/d' "${envfile}"
             printf "FSQL_REASONING_HTTP_TIMEOUT_MS = '%s'\nFSQL_REASONING_HTTP_LOW_SPEED_SECS = '%s'\n" \
-                "${timeout_ms}" "${low_speed_secs}" | sudo tee -a "${envfile}" >/dev/null
-            log "sudo pg_ctlcluster ${TARGET_MAJOR} main restart"
+                "${timeout_ms}" "${low_speed_secs}" | priv "${skip_sudo_debian}" tee -a "${envfile}" >/dev/null
+            log "${debian_restart_cmd}"
             if confirm "Restart PG${TARGET_MAJOR} now to apply it?"; then
-                sudo pg_ctlcluster "${TARGET_MAJOR}" main restart
+                priv "${skip_sudo_debian}" pg_ctlcluster "${TARGET_MAJOR}" main restart
                 ok "PG${TARGET_MAJOR} restarted with a longer reasoning timeout."
             else
-                warn "Not restarted. The longer timeout won't take effect until you run: sudo pg_ctlcluster ${TARGET_MAJOR} main restart"
+                warn "Not restarted. The longer timeout won't take effect until you run: ${debian_restart_cmd}"
             fi
             ;;
         rhel)
@@ -466,16 +489,18 @@ offer_cold_start_timeout() {
                 log "(--dry-run: not actually writing or restarting)"
                 return 0
             fi
-            sudo mkdir -p "${dropin_dir}"
+            local rhel_restart_cmd="systemctl restart postgresql-${TARGET_MAJOR}"
+            [[ "${skip_sudo_rhel}" -eq 1 ]] || rhel_restart_cmd="sudo ${rhel_restart_cmd}"
+            priv "${skip_sudo_rhel}" mkdir -p "${dropin_dir}"
             printf '[Service]\nEnvironment=FSQL_REASONING_HTTP_TIMEOUT_MS=%s\nEnvironment=FSQL_REASONING_HTTP_LOW_SPEED_SECS=%s\n' \
-                "${timeout_ms}" "${low_speed_secs}" | sudo tee "${dropin}" >/dev/null
-            sudo systemctl daemon-reload
-            log "sudo systemctl restart postgresql-${TARGET_MAJOR}"
+                "${timeout_ms}" "${low_speed_secs}" | priv "${skip_sudo_rhel}" tee "${dropin}" >/dev/null
+            priv "${skip_sudo_rhel}" systemctl daemon-reload
+            log "${rhel_restart_cmd}"
             if confirm "Restart PG${TARGET_MAJOR} now to apply it?"; then
-                sudo systemctl restart "postgresql-${TARGET_MAJOR}"
+                priv "${skip_sudo_rhel}" systemctl restart "postgresql-${TARGET_MAJOR}"
                 ok "PG${TARGET_MAJOR} restarted with a longer reasoning timeout."
             else
-                warn "Not restarted. The longer timeout won't take effect until you run: sudo systemctl restart postgresql-${TARGET_MAJOR}"
+                warn "Not restarted. The longer timeout won't take effect until you run: ${rhel_restart_cmd}"
             fi
             ;;
         darwin)

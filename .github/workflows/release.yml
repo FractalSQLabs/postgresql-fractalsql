@@ -131,7 +131,7 @@ jobs:
           VERSION=$(docker exec pg psql -U postgres -tAc \
               "SELECT fractal_version();")
           echo "version: ${VERSION}"
-          test "${VERSION}" = "2.0.9"
+          test "${VERSION}" = "2.0.11"
 
           # Convergence sanity check: query = (0.6, 0.8), objective is
           # cosine distance. Cosine distance is magnitude-invariant,

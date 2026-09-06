@@ -789,7 +789,7 @@ function PgSwapPlugin($path) {
 
 function Gate02Smoke {
     $ver = Psql -Sql "SELECT fractal_version();"
-    if ($ver -eq '2.0.9') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.9)" }
+    if ($ver -eq '2.0.11') { Pass "02 smoke: version=$ver" } else { Fail "02 smoke: version='$ver' (want 2.0.11)" }
     $r = Psql -Sql @"
 WITH q AS (SELECT fractal_search(ARRAY[0.6,0.8]::float8[],100,50,2) AS v)
 SELECT CASE WHEN sqrt(v[1]*v[1]+v[2]*v[2])>1e-9
